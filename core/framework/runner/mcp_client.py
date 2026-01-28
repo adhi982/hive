@@ -400,17 +400,41 @@ class MCPClient:
         except Exception as e:
             raise RuntimeError(f"Failed to call tool via HTTP: {e}") from e
 
+    async def _cleanup_stdio_resources(self) -> None:
+        """Clean up STDIO resources within the event loop."""
+        try:
+            if self._session:
+                await self._session.__aexit__(None, None, None)
+        except Exception as e:
+            logger.error(f"Error closing MCP session: {e}")
+
+        try:
+            if self._stdio_context:
+                await self._stdio_context.__aexit__(None, None, None)
+        except Exception as e:
+            logger.error(f"Error closing STDIO context: {e}")
+
     def disconnect(self) -> None:
         """Disconnect from the MCP server."""
         # Clean up persistent STDIO connection
         if self._loop is not None:
-            # Stop event loop - this will cause context managers to clean up naturally
-            if self._loop and self._loop.is_running():
+            if self._loop.is_running():
+                # Perform graceful cleanup of session and transport
+                future = asyncio.run_coroutine_threadsafe(
+                    self._cleanup_stdio_resources(), self._loop
+                )
+                try:
+                    # Wait for cleanup to complete with a timeout
+                    future.result(timeout=3.0)
+                except Exception as e:
+                    logger.error(f"Error during MCP resource cleanup: {e}")
+
+                # Stop event loop
                 self._loop.call_soon_threadsafe(self._loop.stop)
 
             # Wait for thread to finish
             if self._loop_thread and self._loop_thread.is_alive():
-                self._loop_thread.join(timeout=2)
+                self._loop_thread.join(timeout=3.0)
 
             # Clear references
             self._session = None
